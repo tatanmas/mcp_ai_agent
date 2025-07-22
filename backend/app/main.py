@@ -11,6 +11,9 @@ import logging
 # Importar MCP Server
 from app.mcp.server import mcp_server, execute_legacy_tool_via_mcp, get_mcp_tools, execute_mcp_tool
 
+# Importar Sistema de Base de Datos
+from app.database.database import db_manager
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -297,6 +300,9 @@ async def health_check():
     except Exception as e:
         gemini_status = f"error: {str(e)}"
     
+    # Verificar conexión a base de datos
+    db_status = "connected" if db_manager.test_connection() else "disconnected"
+    
     return {
         "status": "healthy", 
         "timestamp": "2025-01-22",
@@ -305,7 +311,9 @@ async def health_check():
             "gemini": gemini_status,
             "agents": len(agents),
             "mcp_server": "running",
-            "mcp_tools": len(mcp_server.tools)
+            "mcp_tools": len(mcp_server.tools),
+            "database": db_status,
+            "memory_system": "persistent"
         }
     }
 
@@ -469,6 +477,189 @@ async def compare_tool_execution(request: MCPToolRequest):
         
     except Exception as e:
         logger.error(f"❌ Error en comparación: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# ===============================
+# NUEVOS ENDPOINTS MEMORIA PERSISTENTE - AVANCE 2
+# ===============================
+
+@app.get("/api/v1/memory/stats")
+async def get_memory_system_stats():
+    """Estadísticas generales del sistema de memoria"""
+    system_stats = db_manager.get_system_stats()
+    return {
+        "system": system_stats,
+        "memory_system": "persistent",
+        "database_status": system_stats.get("database_status", "unknown")
+    }
+
+class MemoryStoreRequest(BaseModel):
+    agent_id: str
+    memory_type: str = "medium_term"  # short_term, medium_term, long_term
+    content: str
+    context: str = None
+    importance_score: int = 5  # 1-10
+    tags: List[str] = []
+
+@app.post("/api/v1/memory/store")
+async def store_agent_memory(request: MemoryStoreRequest):
+    """Almacena memoria de agente en base de datos persistente"""
+    try:
+        memory_id = db_manager.store_memory(
+            agent_id=request.agent_id,
+            memory_type=request.memory_type,
+            content=request.content,
+            context=request.context,
+            importance_score=request.importance_score,
+            tags=request.tags
+        )
+        
+        if memory_id > 0:
+            return {
+                "success": True,
+                "memory_id": memory_id,
+                "message": f"Memoria almacenada para agente {request.agent_id}",
+                "timestamp": "2025-01-22"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Error almacenando memoria")
+            
+    except Exception as e:
+        logger.error(f"❌ Error en endpoint store_memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+class MemoryRecallRequest(BaseModel):
+    agent_id: str
+    memory_type: str = None
+    search_term: str = None
+    limit: int = 10
+
+@app.post("/api/v1/memory/recall")
+async def recall_agent_memory(request: MemoryRecallRequest):
+    """Recupera memoria de agente desde base de datos"""
+    try:
+        memories = db_manager.recall_memory(
+            agent_id=request.agent_id,
+            memory_type=request.memory_type,
+            search_term=request.search_term,
+            limit=request.limit
+        )
+        
+        return {
+            "success": True,
+            "agent_id": request.agent_id,
+            "memories": memories,
+            "count": len(memories),
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en endpoint recall_memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/api/v1/memory/stats/{agent_id}")
+async def get_agent_memory_stats(agent_id: str):
+    """Estadísticas de memoria de un agente específico"""
+    try:
+        stats = db_manager.get_memory_stats(agent_id)
+        return {
+            "agent_id": agent_id,
+            "memory_stats": stats,
+            "timestamp": "2025-01-22"
+        }
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo stats de memoria para {agent_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# Endpoint para migrar conversación actual a BD (testing)
+@app.post("/api/v1/migrate/conversation/{conversation_id}")
+async def migrate_conversation_to_db(conversation_id: str):
+    """Migra una conversación in-memory a base de datos persistente"""
+    try:
+        if conversation_id not in conversations:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada en memoria")
+        
+        messages = conversations[conversation_id]
+        if not messages:
+            raise HTTPException(status_code=400, detail="Conversación vacía")
+        
+        # Determinar agent_id del primer mensaje del asistente
+        agent_id = "default"
+        for msg in messages:
+            if hasattr(msg, 'role') and msg.role == "assistant":
+                agent_id = getattr(msg, 'agent_id', "default")
+                break
+        
+        # Crear conversación en BD
+        success = db_manager.create_conversation(conversation_id, agent_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Error creando conversación en BD")
+        
+        # Migrar mensajes
+        migrated_count = 0
+        for message in messages:
+            success = db_manager.add_message(
+                conversation_id=conversation_id,
+                role=message.role,
+                content=message.content,
+                agent_id=agent_id
+            )
+            if success:
+                migrated_count += 1
+        
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "messages_migrated": migrated_count,
+            "agent_id": agent_id,
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error migrando conversación {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# Endpoint para probar memoria persistente vs in-memory
+@app.post("/api/v1/memory/compare")
+async def compare_memory_systems(request: MemoryRecallRequest):
+    """Compara memoria persistente vs in-memory para testing"""
+    try:
+        # Memoria persistente
+        persistent_memories = db_manager.recall_memory(
+            agent_id=request.agent_id,
+            memory_type=request.memory_type,
+            search_term=request.search_term,
+            limit=request.limit
+        )
+        
+        # Memoria in-memory (actual)
+        in_memory_count = len(conversations)
+        in_memory_messages = 0
+        for conv_messages in conversations.values():
+            in_memory_messages += len(conv_messages)
+        
+        return {
+            "comparison": {
+                "persistent_memory": {
+                    "memories_count": len(persistent_memories),
+                    "system": "postgresql",
+                    "searchable": True,
+                    "survives_restart": True
+                },
+                "in_memory": {
+                    "conversations": in_memory_count,
+                    "total_messages": in_memory_messages,
+                    "system": "python_dict",
+                    "searchable": False,
+                    "survives_restart": False
+                }
+            },
+            "recommendation": "Use persistent memory for production",
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error comparando sistemas de memoria: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 if __name__ == "__main__":

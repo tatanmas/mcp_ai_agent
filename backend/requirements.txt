@@ -10,4 +10,9 @@ httpx==0.25.2
 python-dotenv==1.0.0
 asyncio==3.4.3
 # MCP Implementation Dependencies (compatibles con FastAPI actual)
-jsonschema>=4.17.0 
+jsonschema>=4.17.0
+# Embeddings Vectoriales + RAG (siguiendo papers SciBORG/MemoryOS)
+# Fix: versiones compatibles para evitar conflictos
+numpy>=1.21.0,<2.0.0
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4 

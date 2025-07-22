@@ -14,6 +14,9 @@ from app.mcp.server import mcp_server, execute_legacy_tool_via_mcp, get_mcp_tool
 # Importar Sistema de Base de Datos
 from app.database.database import db_manager
 
+# Importar Sistema de Memoria Vectorial (Avance 2.5)
+from app.memory.vector_memory import vector_memory
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -313,7 +316,9 @@ async def health_check():
             "mcp_server": "running",
             "mcp_tools": len(mcp_server.tools),
             "database": db_status,
-            "memory_system": "persistent"
+            "memory_system": "persistent",
+            "vector_memory": "enabled",
+            "embedding_model": vector_memory.model_name
         }
     }
 
@@ -660,6 +665,228 @@ async def compare_memory_systems(request: MemoryRecallRequest):
         
     except Exception as e:
         logger.error(f"❌ Error comparando sistemas de memoria: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# ===============================
+# NUEVOS ENDPOINTS MEMORIA VECTORIAL - AVANCE 2.5
+# ===============================
+
+class SemanticSearchRequest(BaseModel):
+    agent_id: str
+    query: str
+    limit: int = 10
+    memory_type: str = None
+    min_score: float = 0.3
+
+@app.post("/api/v1/memory/semantic-search")
+async def semantic_search_endpoint(request: SemanticSearchRequest):
+    """Búsqueda semántica usando embeddings vectoriales"""
+    try:
+        results = vector_memory.semantic_search(
+            agent_id=request.agent_id,
+            query=request.query,
+            limit=request.limit,
+            memory_type=request.memory_type,
+            min_score=request.min_score
+        )
+        
+        return {
+            "success": True,
+            "query": request.query,
+            "agent_id": request.agent_id,
+            "results": results,
+            "count": len(results),
+            "search_type": "semantic",
+            "embedding_model": vector_memory.model_name,
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en búsqueda semántica: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.post("/api/v1/memory/hybrid-search")
+async def hybrid_search_endpoint(request: SemanticSearchRequest):
+    """Búsqueda híbrida: semántica + tradicional (implementando G-Memory approach)"""
+    try:
+        results = vector_memory.hybrid_search(
+            agent_id=request.agent_id,
+            query=request.query,
+            limit=request.limit,
+            memory_type=request.memory_type
+        )
+        
+        # Separar estadísticas por tipo de búsqueda
+        semantic_count = len([r for r in results if r.get('search_type') == 'semantic'])
+        traditional_count = len([r for r in results if r.get('search_type') == 'traditional'])
+        
+        return {
+            "success": True,
+            "query": request.query,
+            "agent_id": request.agent_id,
+            "results": results,
+            "count": len(results),
+            "search_type": "hybrid",
+            "breakdown": {
+                "semantic_results": semantic_count,
+                "traditional_results": traditional_count
+            },
+            "embedding_model": vector_memory.model_name,
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en búsqueda híbrida: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.post("/api/v1/memory/migrate-to-vectors/{agent_id}")
+async def migrate_memories_to_vectors(agent_id: str):
+    """Migra memorias existentes al sistema vectorial (SciBORG RAG indexing)"""
+    try:
+        migrated_count = vector_memory.migrate_existing_memories(agent_id)
+        
+        if migrated_count > 0:
+            return {
+                "success": True,
+                "agent_id": agent_id,
+                "migrated_memories": migrated_count,
+                "message": f"✅ {migrated_count} memorias migradas a sistema vectorial",
+                "embedding_model": vector_memory.model_name,
+                "timestamp": "2025-01-22"
+            }
+        else:
+            return {
+                "success": False,
+                "agent_id": agent_id,
+                "migrated_memories": 0,
+                "message": "No se encontraron memorias para migrar o error en migración",
+                "timestamp": "2025-01-22"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error migrando memorias a vectores: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/api/v1/memory/vector-stats/{agent_id}")
+async def get_vector_memory_stats(agent_id: str):
+    """Estadísticas del sistema de memoria vectorial"""
+    try:
+        vector_stats = vector_memory.get_vector_stats(agent_id)
+        traditional_stats = db_manager.get_memory_stats(agent_id)
+        
+        return {
+            "agent_id": agent_id,
+            "vector_memory": vector_stats,
+            "traditional_memory": traditional_stats,
+            "comparison": {
+                "vectors_indexed": vector_stats.get('total_vectors', 0),
+                "traditional_memories": traditional_stats.get('total_memories', 0),
+                "embedding_coverage": f"{(vector_stats.get('total_vectors', 0) / max(traditional_stats.get('total_memories', 1), 1) * 100):.1f}%"
+            },
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo stats vectoriales: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# Modificar endpoint de store para auto-indexar en vectores
+@app.post("/api/v1/memory/store-enhanced")
+async def store_agent_memory_enhanced(request: MemoryStoreRequest):
+    """Almacena memoria con auto-indexación vectorial"""
+    try:
+        # Almacenar en BD tradicional
+        memory_id = db_manager.store_memory(
+            agent_id=request.agent_id,
+            memory_type=request.memory_type,
+            content=request.content,
+            context=request.context,
+            importance_score=request.importance_score,
+            tags=request.tags
+        )
+        
+        if memory_id > 0:
+            # Auto-indexar en sistema vectorial
+            vector_success = vector_memory.add_memory_to_vector_store(
+                agent_id=request.agent_id,
+                memory_id=memory_id,
+                content=request.content,
+                memory_type=request.memory_type,
+                importance_score=request.importance_score,
+                tags=request.tags
+            )
+            
+            return {
+                "success": True,
+                "memory_id": memory_id,
+                "message": f"Memoria almacenada para agente {request.agent_id}",
+                "vector_indexed": vector_success,
+                "enhanced_storage": True,
+                "timestamp": "2025-01-22"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Error almacenando memoria")
+            
+    except Exception as e:
+        logger.error(f"❌ Error en store enhanced: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# Test endpoint para comparar tipos de búsqueda
+@app.post("/api/v1/memory/search-comparison")
+async def compare_search_methods(request: SemanticSearchRequest):
+    """Compara diferentes métodos de búsqueda (traditional vs semantic vs hybrid)"""
+    try:
+        # Búsqueda tradicional
+        traditional_results = db_manager.recall_memory(
+            agent_id=request.agent_id,
+            memory_type=request.memory_type,
+            search_term=request.query,
+            limit=request.limit
+        )
+        
+        # Búsqueda semántica
+        semantic_results = vector_memory.semantic_search(
+            agent_id=request.agent_id,
+            query=request.query,
+            limit=request.limit,
+            memory_type=request.memory_type,
+            min_score=request.min_score
+        )
+        
+        # Búsqueda híbrida
+        hybrid_results = vector_memory.hybrid_search(
+            agent_id=request.agent_id,
+            query=request.query,
+            limit=request.limit,
+            memory_type=request.memory_type
+        )
+        
+        return {
+            "query": request.query,
+            "agent_id": request.agent_id,
+            "comparison": {
+                "traditional": {
+                    "count": len(traditional_results),
+                    "results": traditional_results,
+                    "method": "SQL ILIKE"
+                },
+                "semantic": {
+                    "count": len(semantic_results),
+                    "results": semantic_results,
+                    "method": f"FAISS + {vector_memory.model_name}"
+                },
+                "hybrid": {
+                    "count": len(hybrid_results),
+                    "results": hybrid_results,
+                    "method": "Combined SQL + Vector"
+                }
+            },
+            "recommendation": "hybrid" if len(hybrid_results) >= len(semantic_results) else "semantic",
+            "timestamp": "2025-01-22"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error comparando métodos de búsqueda: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 if __name__ == "__main__":

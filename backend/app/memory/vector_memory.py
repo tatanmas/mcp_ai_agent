@@ -322,32 +322,153 @@ class VectorMemorySystem:
             return {'status': 'error', 'error': str(e)}
     
     def save_vector_store(self, agent_id: str, filepath: str = None) -> bool:
-        """Guarda el vector store en disco (opcional para persistencia)"""
+        """Guarda el vector store en disco para persistencia"""
         try:
             if agent_id not in self.vector_stores:
+                logger.warning(f"⚠️ No hay vector store para guardar: {agent_id}")
                 return False
             
-            if not filepath:
-                filepath = f"/tmp/vector_store_{agent_id}.pkl"
+            if filepath is None:
+                filepath = f"vector_store_{agent_id}.pkl"
             
             agent_store = self.vector_stores[agent_id]
             
-            # Serializar datos
-            store_data = {
-                'metadata': agent_store['metadata'],
-                'memory_ids': agent_store['memory_ids'],
-                'faiss_index': faiss.serialize_index(agent_store['index'])
-            }
+            # Guardar índice FAISS
+            faiss.write_index(agent_store['index'], f"{filepath}.faiss")
             
-            with open(filepath, 'wb') as f:
-                pickle.dump(store_data, f)
+            # Guardar metadatos
+            with open(f"{filepath}.meta", 'wb') as f:
+                pickle.dump({
+                    'metadata': agent_store['metadata'],
+                    'memory_ids': agent_store['memory_ids'],
+                    'model_name': self.model_name,
+                    'vector_dim': self.vector_dim
+                }, f)
             
-            logger.info(f"💾 Vector store guardado: {filepath}")
+            logger.info(f"✅ Vector store guardado: {filepath}")
             return True
             
         except Exception as e:
             logger.error(f"❌ Error guardando vector store: {e}")
             return False
+    
+    # ===============================
+    # MÉTODOS DE COMPATIBILIDAD (NUEVOS)
+    # ===============================
+    
+    async def search_memories(self, agent_id: str, query: str, limit: int = 10, 
+                            memory_type: str = None) -> List[Dict[str, Any]]:
+        """
+        Método de compatibilidad para búsqueda de memorias
+        Wrapper que combina búsqueda semántica + BD
+        """
+        try:
+            # Búsqueda semántica vectorial
+            semantic_results = self.semantic_search(
+                agent_id=agent_id,
+                query=query,
+                limit=limit//2,
+                memory_type=memory_type,
+                min_score=0.3
+            )
+            
+            # Búsqueda en BD como fallback
+            db_results = []
+            try:
+                db_results = db_manager.get_agent_memories(
+                    agent_id=agent_id,
+                    memory_type=memory_type,
+                    limit=limit//2
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Error en búsqueda BD: {e}")
+            
+            # Combinar resultados
+            combined_results = []
+            
+            # Añadir resultados semánticos
+            for result in semantic_results:
+                combined_results.append({
+                    'memory_id': result['memory_id'],
+                    'content': result['content'],
+                    'memory_type': result['memory_type'],
+                    'importance_score': result['importance_score'],
+                    'semantic_score': result['semantic_score'],
+                    'source': 'vector_search'
+                })
+            
+            # Añadir resultados de BD
+            for result in db_results:
+                # Evitar duplicados
+                if not any(r['memory_id'] == result['id'] for r in combined_results):
+                    combined_results.append({
+                        'memory_id': result['id'],
+                        'content': result['content'],
+                        'memory_type': result['memory_type'],
+                        'importance_score': result['importance_score'],
+                        'semantic_score': 0.5,  # Score por defecto
+                        'source': 'database_search'
+                    })
+            
+            # Ordenar por importancia y score semántico
+            combined_results.sort(
+                key=lambda x: (x['importance_score'], x['semantic_score']), 
+                reverse=True
+            )
+            
+            # Limitar resultados
+            combined_results = combined_results[:limit]
+            
+            logger.info(f"🔍 Búsqueda de memorias para '{query}': {len(combined_results)} resultados")
+            return combined_results
+            
+        except Exception as e:
+            logger.error(f"❌ Error en search_memories: {e}")
+            return []
+    
+    async def store_memory(self, agent_id: str, memory_type: str, content: str,
+                          context: str = None, importance_score: int = 5,
+                          conversation_id: str = None, tags: List[str] = None) -> int:
+        """
+        Método de compatibilidad para almacenar memoria
+        Wrapper que almacena en BD + vector store
+        """
+        try:
+            # 1. Almacenar en BD
+            memory_id = db_manager.store_memory(
+                agent_id=agent_id,
+                memory_type=memory_type,
+                content=content,
+                context=context,
+                importance_score=importance_score,
+                conversation_id=conversation_id,
+                tags=tags or []
+            )
+            
+            if memory_id:
+                # 2. Almacenar en vector store
+                success = self.add_memory_to_vector_store(
+                    agent_id=agent_id,
+                    memory_id=memory_id,
+                    content=content,
+                    memory_type=memory_type,
+                    importance_score=importance_score,
+                    tags=tags or []
+                )
+                
+                if success:
+                    logger.info(f"✅ Memoria {memory_id} almacenada en BD y vector store")
+                else:
+                    logger.warning(f"⚠️ Memoria {memory_id} almacenada solo en BD")
+                
+                return memory_id
+            else:
+                logger.error(f"❌ Error almacenando memoria en BD")
+                return 0
+                
+        except Exception as e:
+            logger.error(f"❌ Error en store_memory: {e}")
+            return 0
 
 # Instancia global del sistema de memoria vectorial
 vector_memory = VectorMemorySystem() 

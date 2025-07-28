@@ -1,894 +1,249 @@
+"""
+AgentOS Main Application - FastAPI Server
+Sistema de agentes cognitivos hiper-inteligentes con MCP
+"""
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import os
-import google.generativeai as genai
-from typing import List, Optional
-import asyncio
-import json
 import logging
+import asyncio
+from typing import Dict, Any, Optional
 
-# Importar MCP Server
-from app.mcp.server import mcp_server, execute_legacy_tool_via_mcp, get_mcp_tools, execute_mcp_tool
-
-# Importar Sistema de Base de Datos
-from app.database.database import db_manager
-
-# Importar Sistema de Memoria Vectorial (Avance 2.5)
-from app.memory.vector_memory import vector_memory
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="AgentOS API",
-    description="Sistema Avanzado de Agentes IA - Backend MVP",
-    version="1.0.0"
+# Importar modelos centralizados
+from .models import (
+    UnifiedTaskRequest, SystemStatusResponse,
+    CognitiveAgentRequest, CognitiveAgentResponse,
+    ToolExecutionRequest, ToolExecutionResponse
 )
 
-# CORS middleware
+# Importar módulos de API
+from .api import register_v1_endpoints, register_v2_endpoints
+
+# Importar componentes del sistema
+from .orchestrator import orchestrator
+from .agents.cognitive_coordinator import cognitive_coordinator
+from .tools.mcp_real_tools_bridge import mcp_real_tools_bridge
+
+logger = logging.getLogger(__name__)
+
+# ===============================
+# CONFIGURACIÓN DE FASTAPI
+# ===============================
+
+app = FastAPI(
+    title="AgentOS - Sistema de Agentes Cognitivos",
+    description="Sistema de agentes hiper-inteligentes con MCP y herramientas reales",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Más permisivo para testing
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure Gemini API with error handling
-try:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("GEMINI_API_KEY no está configurada!")
-        raise ValueError("GEMINI_API_KEY es requerida")
-    
-    genai.configure(api_key=api_key)
-    logger.info("✅ Gemini API configurada correctamente")
-except Exception as e:
-    logger.error(f"❌ Error configurando Gemini API: {e}")
+# ===============================
+# REGISTRO DE ENDPOINTS
+# ===============================
 
-# Pydantic models
-class ChatMessage(BaseModel):
-    role: str
-    content: str
+# Registrar endpoints V1 (básicos)
+register_v1_endpoints(app)
 
-class ChatRequest(BaseModel):
-    message: str
-    agent_id: Optional[str] = "default"
-    conversation_id: Optional[str] = None
+# Registrar endpoints V2 (enterprise)
+register_v2_endpoints(app)
 
-class ChatResponse(BaseModel):
-    response: str
-    agent_id: str
-    conversation_id: str
-    memory_used: bool = False
+# ===============================
+# ENDPOINTS PRINCIPALES
+# ===============================
 
-class Agent(BaseModel):
-    id: str
-    name: str
-    description: str
-    personality: str
-    tools: List[str]
-    memory_type: str
-
-# In-memory storage (simple MVP)
-conversations = {}
-agents = {
-    "default": Agent(
-        id="default",
-        name="Asistente General",
-        description="Un agente inteligente con acceso a herramientas básicas",
-        personality="Amigable, útil y preciso. Siempre busca resolver problemas de manera eficiente y usa herramientas cuando es necesario.",
-        tools=["web_search", "calculator", "memory"],
-        memory_type="enhanced"
-    ),
-    "researcher": Agent(
-        id="researcher",
-        name="Investigador IA",
-        description="Especialista en investigación y análisis de información",
-        personality="Analítico, meticuloso y orientado a los datos. Proporciona información detallada y verificada. Siempre busca fuentes confiables.",
-        tools=["web_search", "pdf_analysis", "data_visualization", "memory"],
-        memory_type="long_term"
-    ),
-    "coder": Agent(
-        id="coder",
-        name="Desarrollador IA",
-        description="Experto en programación y desarrollo de software",
-        personality="Técnico, preciso y orientado a las mejores prácticas. Genera código limpio, eficiente y bien documentado.",
-        tools=["code_execution", "github_search", "documentation", "memory"],
-        memory_type="technical"
-    )
-}
-
-# Simple tool functions
-async def web_search_tool(query: str) -> str:
-    """Simula una búsqueda web inteligente"""
-    logger.info(f"🔍 Búsqueda web: {query}")
-    # En el futuro aquí iría SerpAPI o similar
-    return f"Resultados de búsqueda para '{query}': He encontrado información relevante sobre {query}. Los datos más recientes indican tendencias positivas y múltiples fuentes confirman la importancia del tema."
-
-async def calculator_tool(expression: str) -> str:
-    """Calculadora segura"""
-    logger.info(f"🧮 Calculando: {expression}")
-    try:
-        # Evaluación más segura - solo permite operaciones básicas
-        allowed_chars = set('0123456789+-*/.() ')
-        if all(c in allowed_chars for c in expression):
-            result = eval(expression)
-            return f"Resultado: {result}"
-        else:
-            return "Error: Solo se permiten operaciones matemáticas básicas"
-    except Exception as e:
-        logger.error(f"Error en cálculo: {e}")
-        return f"Error en el cálculo: {str(e)}"
-
-async def memory_tool(action: str, data: str = None) -> str:
-    """Sistema de memoria simple pero funcional"""
-    logger.info(f"🧠 Memoria {action}: {data[:50] if data else 'N/A'}...")
-    if action == "store":
-        return f"✅ Información almacenada en memoria: {data[:100]}..."
-    elif action == "recall":
-        return "📝 Recuperando de memoria: Información contextual relevante de conversaciones anteriores"
-    return "❌ Acción de memoria no reconocida"
-
-async def pdf_analysis_tool(document: str) -> str:
-    """Simula análisis de documentos PDF"""
-    logger.info(f"📄 Analizando documento: {document}")
-    return f"Análisis completado del documento '{document}': Documento procesado, extraídos puntos clave y resumen generado."
-
-async def code_execution_tool(code: str) -> str:
-    """Simula ejecución de código"""
-    logger.info(f"💻 Ejecutando código: {code[:50]}...")
-    return f"Código ejecutado exitosamente. Resultado: [simulado] - El código proporcionado ha sido analizado y ejecutado en un entorno seguro."
-
-# Tool registry expandido
-tools_registry = {
-    "web_search": web_search_tool,
-    "calculator": calculator_tool,
-    "memory": memory_tool,
-    "pdf_analysis": pdf_analysis_tool,
-    "data_visualization": lambda data: f"📊 Gráfico generado para: {data}",
-    "code_execution": code_execution_tool,
-    "github_search": lambda query: f"🐙 Búsqueda en GitHub: {query} - Repositorios relevantes encontrados",
-    "documentation": lambda topic: f"📚 Documentación de {topic}: Guías y ejemplos disponibles"
-}
-
-async def execute_tool(tool_name: str, **kwargs) -> str:
-    """Ejecuta una herramienta específica con mejor manejo de errores"""
-    try:
-        if tool_name in tools_registry:
-            tool_func = tools_registry[tool_name]
-            if asyncio.iscoroutinefunction(tool_func):
-                return await tool_func(**kwargs)
-            else:
-                return tool_func(**kwargs)
-        return f"❌ Herramienta '{tool_name}' no encontrada"
-    except Exception as e:
-        logger.error(f"Error ejecutando herramienta {tool_name}: {e}")
-        return f"❌ Error ejecutando {tool_name}: {str(e)}"
-
-async def generate_response_with_gemini(message: str, agent: Agent, conversation_history: List[ChatMessage]) -> str:
-    """Genera respuesta usando Gemini con mejor prompt engineering"""
-    
-    # Construir prompt optimizado
-    system_prompt = f"""Eres {agent.name}: {agent.description}
-
-Personalidad: {agent.personality}
-
-Herramientas disponibles: {', '.join(agent.tools)}
-
-INSTRUCCIONES IMPORTANTES:
-- Mantén tu personalidad única y consistente
-- Si necesitas usar herramientas, usa el formato: [TOOL:nombre_herramienta:parámetros]
-- Para cálculos matemáticos, SIEMPRE usa [TOOL:calculator:expresión]
-- Para búsquedas de información, usa [TOOL:web_search:consulta]
-- Para recordar información, usa [TOOL:memory:store:información] o [TOOL:memory:recall:]
-- Sé específico, útil y mantén el contexto de conversaciones anteriores
-- Responde en español de manera natural y conversacional
-"""
-    
-    # Construir historial de conversación
-    history_context = ""
-    if conversation_history:
-        recent_messages = conversation_history[-6:]  # Últimos 6 mensajes
-        history_context = "\n".join([f"{msg.role}: {msg.content}" for msg in recent_messages])
-    
-    full_prompt = f"{system_prompt}\n\nHistorial reciente:\n{history_context}\n\nUsuario: {message}\n\n{agent.name}:"
-    
-    try:
-        # Usar Gemini con configuración optimizada
-        model = genai.GenerativeModel(
-            'gemini-1.5-pro',
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-                max_output_tokens=1000,
-                top_p=0.8,
-                top_k=40
-            )
-        )
-        
-        response = model.generate_content(full_prompt)
-        
-        if response.text:
-            logger.info(f"✅ Respuesta generada por Gemini para agente {agent.id}")
-            return response.text
-        else:
-            logger.warning("⚠️ Gemini devolvió respuesta vacía")
-            return "Lo siento, no pude generar una respuesta en este momento. ¿Podrías reformular tu pregunta?"
-            
-    except Exception as e:
-        logger.error(f"❌ Error con Gemini: {e}")
-        # Fallback response
-        return f"Como {agent.name}, entiendo tu consulta '{message}'. Aunque tengo limitaciones técnicas temporales, puedo ayudarte con información general y usar mis herramientas cuando sea necesario."
-
-async def process_tools_in_response(response: str, agent: Agent) -> str:
-    """Procesa y ejecuta herramientas con mejor parsing y manejo de errores"""
-    
-    if "[TOOL:" not in response:
-        return response
-    
-    # Parsing más robusto de herramientas
-    import re
-    tool_pattern = r'\[TOOL:([^:]+):([^\]]*)\]'
-    tools_found = re.findall(tool_pattern, response)
-    
-    logger.info(f"🔧 Encontradas {len(tools_found)} herramientas para ejecutar")
-    
-    for tool_name, params in tools_found:
-        if tool_name in agent.tools:
-            try:
-                logger.info(f"⚙️ Ejecutando {tool_name} con parámetros: {params}")
-                
-                # Parsing más inteligente de parámetros
-                if tool_name == "web_search":
-                    tool_result = await execute_tool(tool_name, query=params)
-                elif tool_name == "calculator":
-                    tool_result = await execute_tool(tool_name, expression=params)
-                elif tool_name == "memory":
-                    if ":" in params:
-                        action, data = params.split(":", 1)
-                        tool_result = await execute_tool(tool_name, action=action, data=data)
-                    else:
-                        tool_result = await execute_tool(tool_name, action=params)
-                elif tool_name in ["pdf_analysis", "code_execution", "github_search", "documentation"]:
-                    # Herramientas que toman un parámetro genérico
-                    if tool_name == "pdf_analysis":
-                        tool_result = await execute_tool(tool_name, document=params)
-                    elif tool_name == "code_execution":
-                        tool_result = await execute_tool(tool_name, code=params)
-                    else:
-                        tool_result = await execute_tool(tool_name, query=params)
-                else:
-                    tool_result = await execute_tool(tool_name, data=params)
-                
-                # Reemplazar la llamada de herramienta con el resultado
-                tool_call = f"[TOOL:{tool_name}:{params}]"
-                tool_output = f"\n\n🔧 **Uso de {tool_name}:** {tool_result}\n"
-                response = response.replace(tool_call, tool_output)
-                
-            except Exception as e:
-                logger.error(f"❌ Error ejecutando {tool_name}: {e}")
-                tool_call = f"[TOOL:{tool_name}:{params}]"
-                error_output = f"\n\n❌ **Error en {tool_name}:** {str(e)}\n"
-                response = response.replace(tool_call, error_output)
-        else:
-            logger.warning(f"⚠️ Herramienta {tool_name} no disponible para agente {agent.id}")
-    
-    return response
-
-# API Routes
 @app.get("/")
 async def root():
+    """Endpoint raíz con información del sistema"""
     return {
-        "message": "AgentOS Backend API está funcionando!", 
-        "version": "1.0.0",
-        "status": "active",
-        "agents_available": len(agents)
-    }
-
-@app.get("/health")
-async def health_check():
-    # Verificar conectividad con Gemini
-    gemini_status = "OK"
-    try:
-        # Test básico de Gemini
-        test_model = genai.GenerativeModel('gemini-1.5-pro')
-        # No hacer llamada real, solo verificar que esté configurado
-        if os.getenv("GEMINI_API_KEY"):
-            gemini_status = "configured"
-        else:
-            gemini_status = "not_configured"
-    except Exception as e:
-        gemini_status = f"error: {str(e)}"
-    
-    # Verificar conexión a base de datos
-    db_status = "connected" if db_manager.test_connection() else "disconnected"
-    
-    return {
-        "status": "healthy", 
-        "timestamp": "2025-01-22",
-        "services": {
-            "api": "running",
-            "gemini": gemini_status,
-            "agents": len(agents),
-            "mcp_server": "running",
-            "mcp_tools": len(mcp_server.tools),
-            "database": db_status,
-            "memory_system": "persistent",
-            "vector_memory": "enabled",
-            "embedding_model": vector_memory.model_name
+        "message": "AgentOS - Sistema de Agentes Cognitivos Hiper-Inteligentes",
+        "version": "2.0.0",
+        "status": "operational",
+        "features": [
+            "Cognitive Agents (Researcher, Coder, Coordinator)",
+            "MCP Server Integration",
+            "Real Tools Bridge",
+            "Enterprise Task Tracking",
+            "Real-time Streaming",
+            "Memory Systems",
+            "Test-Time Learning"
+        ],
+        "endpoints": {
+            "v1": "/api/v1/*",
+            "v2": "/api/v2/*",
+            "docs": "/docs",
+            "status": "/status"
         }
     }
 
-@app.get("/api/v1/agents")
-async def get_agents():
-    """Obtiene lista de agentes disponibles"""
-    logger.info("📋 Solicitando lista de agentes")
-    return {"agents": list(agents.values())}
-
-@app.get("/api/v1/agents/{agent_id}")
-async def get_agent(agent_id: str):
-    """Obtiene información de un agente específico"""
-    if agent_id not in agents:
-        raise HTTPException(status_code=404, detail="Agente no encontrado")
-    logger.info(f"🤖 Solicitando información del agente: {agent_id}")
-    return {"agent": agents[agent_id]}
-
-@app.post("/api/v1/chat", response_model=ChatResponse)
-async def chat_with_agent(request: ChatRequest):
-    """Endpoint principal para chatear con agentes"""
-    
-    logger.info(f"💬 Nueva consulta para agente {request.agent_id}: {request.message[:50]}...")
-    
-    # Validar agente
-    if request.agent_id not in agents:
-        raise HTTPException(status_code=404, detail="Agente no encontrado")
-    
-    agent = agents[request.agent_id]
-    
-    # Generar conversation_id si no existe
-    conversation_id = request.conversation_id or f"conv_{len(conversations) + 1}"
-    
-    # Inicializar conversación si no existe
-    if conversation_id not in conversations:
-        conversations[conversation_id] = []
-    
-    # Agregar mensaje del usuario al historial
-    user_message = ChatMessage(role="user", content=request.message)
-    conversations[conversation_id].append(user_message)
-    
+@app.get("/status", response_model=SystemStatusResponse)
+async def get_system_status():
+    """Estado completo del sistema"""
     try:
-        # Generar respuesta con Gemini
-        ai_response = await generate_response_with_gemini(
-            request.message, 
-            agent, 
-            conversations[conversation_id]
-        )
+        # Obtener estado de agentes cognitivos
+        cognitive_status = cognitive_coordinator.get_cognitive_agents_status()
         
-        # Procesar herramientas en la respuesta
-        final_response = await process_tools_in_response(ai_response, agent)
+        # Obtener herramientas MCP disponibles
+        mcp_tools = await mcp_real_tools_bridge.get_available_real_tools()
         
-        # Agregar respuesta del agente al historial
-        agent_message = ChatMessage(role="assistant", content=final_response)
-        conversations[conversation_id].append(agent_message)
-        
-        # Limitar historial (últimos 30 mensajes)
-        if len(conversations[conversation_id]) > 30:
-            conversations[conversation_id] = conversations[conversation_id][-30:]
-        
-        logger.info(f"✅ Respuesta generada exitosamente para {conversation_id}")
-        
-        return ChatResponse(
-            response=final_response,
-            agent_id=request.agent_id,
-            conversation_id=conversation_id,
-            memory_used=True
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Error procesando solicitud: {e}")
-        raise HTTPException(status_code=500, detail=f"Error procesando solicitud: {str(e)}")
-
-@app.get("/api/v1/conversations/{conversation_id}")
-async def get_conversation_history(conversation_id: str):
-    """Obtiene el historial de una conversación"""
-    if conversation_id not in conversations:
-        raise HTTPException(status_code=404, detail="Conversación no encontrada")
-    
-    return {
-        "conversation_id": conversation_id,
-        "messages": conversations[conversation_id],
-        "message_count": len(conversations[conversation_id])
-    }
-
-# ===============================
-# NUEVOS ENDPOINTS MCP ESTÁNDAR
-# ===============================
-
-@app.get("/mcp/info")
-async def get_mcp_server_info():
-    """Información del servidor MCP estándar"""
-    return mcp_server.get_server_info()
-
-@app.get("/mcp/tools")
-async def list_mcp_tools():
-    """Lista herramientas en formato MCP estándar"""
-    tools = await get_mcp_tools()
-    return {
-        "tools": [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.inputSchema
-            }
-            for tool in tools
-        ]
-    }
-
-class MCPToolRequest(BaseModel):
-    name: str
-    arguments: dict
-
-@app.post("/mcp/tools/execute")
-async def execute_mcp_tool_endpoint(request: MCPToolRequest):
-    """Ejecuta herramienta usando protocolo MCP estándar"""
-    try:
-        result = await execute_mcp_tool(request.name, request.arguments)
-        return {
-            "result": result.content,
-            "isError": result.isError,
-            "timestamp": "2025-01-22"
-        }
-    except Exception as e:
-        logger.error(f"❌ Error ejecutando herramienta MCP {request.name}: {e}")
-        return {
-            "result": [{"type": "text", "text": f"Error: {str(e)}"}],
-            "isError": True,
-            "timestamp": "2025-01-22"
-        }
-
-# Endpoint para comparar legacy vs MCP
-@app.post("/api/v1/tools/compare")
-async def compare_tool_execution(request: MCPToolRequest):
-    """Compara ejecución legacy vs MCP para testing"""
-    try:
-        # Ejecución MCP
-        mcp_result = await execute_mcp_tool(request.name, request.arguments)
-        
-        # Ejecución Legacy (para comparación)
-        if request.name == "calculator":
-            legacy_params = request.arguments.get("expression", "")
-        elif request.name == "web_search":
-            legacy_params = request.arguments.get("query", "")
-        elif request.name == "memory":
-            action = request.arguments.get("action", "")
-            data = request.arguments.get("data", "")
-            legacy_params = f"{action}:{data}" if data else action
-        else:
-            legacy_params = str(request.arguments)
-        
-        legacy_result = await execute_legacy_tool_via_mcp(request.name, legacy_params)
-        
-        return {
-            "tool": request.name,
-            "arguments": request.arguments,
-            "mcp_result": mcp_result.content[0]["text"],
-            "legacy_result": legacy_result,
-            "results_match": mcp_result.content[0]["text"] == legacy_result,
-            "timestamp": "2025-01-22"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error en comparación: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# ===============================
-# NUEVOS ENDPOINTS MEMORIA PERSISTENTE - AVANCE 2
-# ===============================
-
-@app.get("/api/v1/memory/stats")
-async def get_memory_system_stats():
-    """Estadísticas generales del sistema de memoria"""
-    system_stats = db_manager.get_system_stats()
-    return {
-        "system": system_stats,
-        "memory_system": "persistent",
-        "database_status": system_stats.get("database_status", "unknown")
-    }
-
-class MemoryStoreRequest(BaseModel):
-    agent_id: str
-    memory_type: str = "medium_term"  # short_term, medium_term, long_term
-    content: str
-    context: str = None
-    importance_score: int = 5  # 1-10
-    tags: List[str] = []
-
-@app.post("/api/v1/memory/store")
-async def store_agent_memory(request: MemoryStoreRequest):
-    """Almacena memoria de agente en base de datos persistente"""
-    try:
-        memory_id = db_manager.store_memory(
-            agent_id=request.agent_id,
-            memory_type=request.memory_type,
-            content=request.content,
-            context=request.context,
-            importance_score=request.importance_score,
-            tags=request.tags
-        )
-        
-        if memory_id > 0:
-            return {
-                "success": True,
-                "memory_id": memory_id,
-                "message": f"Memoria almacenada para agente {request.agent_id}",
-                "timestamp": "2025-01-22"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Error almacenando memoria")
-            
-    except Exception as e:
-        logger.error(f"❌ Error en endpoint store_memory: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-class MemoryRecallRequest(BaseModel):
-    agent_id: str
-    memory_type: str = None
-    search_term: str = None
-    limit: int = 10
-
-@app.post("/api/v1/memory/recall")
-async def recall_agent_memory(request: MemoryRecallRequest):
-    """Recupera memoria de agente desde base de datos"""
-    try:
-        memories = db_manager.recall_memory(
-            agent_id=request.agent_id,
-            memory_type=request.memory_type,
-            search_term=request.search_term,
-            limit=request.limit
-        )
-        
-        return {
-            "success": True,
-            "agent_id": request.agent_id,
-            "memories": memories,
-            "count": len(memories),
-            "timestamp": "2025-01-22"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error en endpoint recall_memory: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/api/v1/memory/stats/{agent_id}")
-async def get_agent_memory_stats(agent_id: str):
-    """Estadísticas de memoria de un agente específico"""
-    try:
-        stats = db_manager.get_memory_stats(agent_id)
-        return {
-            "agent_id": agent_id,
-            "memory_stats": stats,
-            "timestamp": "2025-01-22"
-        }
-    except Exception as e:
-        logger.error(f"❌ Error obteniendo stats de memoria para {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# Endpoint para migrar conversación actual a BD (testing)
-@app.post("/api/v1/migrate/conversation/{conversation_id}")
-async def migrate_conversation_to_db(conversation_id: str):
-    """Migra una conversación in-memory a base de datos persistente"""
-    try:
-        if conversation_id not in conversations:
-            raise HTTPException(status_code=404, detail="Conversación no encontrada en memoria")
-        
-        messages = conversations[conversation_id]
-        if not messages:
-            raise HTTPException(status_code=400, detail="Conversación vacía")
-        
-        # Determinar agent_id del primer mensaje del asistente
-        agent_id = "default"
-        for msg in messages:
-            if hasattr(msg, 'role') and msg.role == "assistant":
-                agent_id = getattr(msg, 'agent_id', "default")
-                break
-        
-        # Crear conversación en BD
-        success = db_manager.create_conversation(conversation_id, agent_id)
-        if not success:
-            raise HTTPException(status_code=500, detail="Error creando conversación en BD")
-        
-        # Migrar mensajes
-        migrated_count = 0
-        for message in messages:
-            success = db_manager.add_message(
-                conversation_id=conversation_id,
-                role=message.role,
-                content=message.content,
-                agent_id=agent_id
-            )
-            if success:
-                migrated_count += 1
-        
-        return {
-            "success": True,
-            "conversation_id": conversation_id,
-            "messages_migrated": migrated_count,
-            "agent_id": agent_id,
-            "timestamp": "2025-01-22"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error migrando conversación {conversation_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# Endpoint para probar memoria persistente vs in-memory
-@app.post("/api/v1/memory/compare")
-async def compare_memory_systems(request: MemoryRecallRequest):
-    """Compara memoria persistente vs in-memory para testing"""
-    try:
-        # Memoria persistente
-        persistent_memories = db_manager.recall_memory(
-            agent_id=request.agent_id,
-            memory_type=request.memory_type,
-            search_term=request.search_term,
-            limit=request.limit
-        )
-        
-        # Memoria in-memory (actual)
-        in_memory_count = len(conversations)
-        in_memory_messages = 0
-        for conv_messages in conversations.values():
-            in_memory_messages += len(conv_messages)
-        
-        return {
-            "comparison": {
-                "persistent_memory": {
-                    "memories_count": len(persistent_memories),
-                    "system": "postgresql",
-                    "searchable": True,
-                    "survives_restart": True
+        return SystemStatusResponse(
+            status="operational",
+            version="2.0.0",
+            components={
+                "orchestrator": "active",
+                "cognitive_coordinator": "operational",
+                "mcp_server": "connected",
+                "real_tools_bridge": "active",
+                "memory_systems": "operational"
+            },
+            cognitive_agents=cognitive_status,
+            mcp_tools={
+                "total_tools": len(mcp_tools),
+                "categories": {
+                    "web_search": len([t for t in mcp_tools if t["category"] == "web_search"]),
+                    "document_analysis": len([t for t in mcp_tools if t["category"] == "document_analysis"]),
+                    "data_visualization": len([t for t in mcp_tools if t["category"] == "data_visualization"]),
+                    "file_operations": len([t for t in mcp_tools if t["category"] == "file_operations"])
                 },
-                "in_memory": {
-                    "conversations": in_memory_count,
-                    "total_messages": in_memory_messages,
-                    "system": "python_dict",
-                    "searchable": False,
-                    "survives_restart": False
-                }
-            },
-            "recommendation": "Use persistent memory for production",
-            "timestamp": "2025-01-22"
+                "tools": mcp_tools
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo estado del sistema: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/cognitive/execute")
+async def execute_with_cognitive_agents(request: CognitiveAgentRequest):
+    """
+    Ejecutar tarea con agentes cognitivos especializados
+    Usa el cognitive_coordinator para razonamiento especializado
+    """
+    try:
+        logger.info(f"🧠 Ejecutando con agentes cognitivos: {request.query}")
+        
+        result = await cognitive_coordinator.coordinate_with_cognitive_agents(
+            task=request.query,
+            user_context=request.context or {}
+        )
+        
+        return {
+            "success": result.get("coordination_success", False),
+            "task_id": result.get("task_id"),
+            "cognitive_agents_used": result.get("cognitive_agents_used", []),
+            "specialized_insights": result.get("specialized_insights", {}),
+            "final_synthesis": result.get("final_synthesis", {}),
+            "learning_updated": result.get("learning_updated", False),
+            "timestamp": result.get("timestamp")
         }
         
     except Exception as e:
-        logger.error(f"❌ Error comparando sistemas de memoria: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        logger.error(f"Error en ejecución cognitiva: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/cognitive/agents")
+async def get_cognitive_agents():
+    """Obtener información de agentes cognitivos"""
+    try:
+        status = cognitive_coordinator.get_cognitive_agents_status()
+        
+        return {
+            "cognitive_agents": status,
+            "total_agents": len(cognitive_coordinator.cognitive_agents),
+            "specializations": {
+                "researcher": "Research & Analysis",
+                "coder": "Development & Implementation", 
+                "coordinator": "Orchestration & Synthesis"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo agentes cognitivos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tools/real")
+async def get_real_tools():
+    """Obtener herramientas reales disponibles vía MCP"""
+    try:
+        tools = await mcp_real_tools_bridge.get_available_real_tools()
+        
+        return {
+            "real_tools": tools,
+            "total_tools": len(tools),
+            "categories": {
+                "web_search": len([t for t in tools if t["category"] == "web_search"]),
+                "document_analysis": len([t for t in tools if t["category"] == "document_analysis"]),
+                "data_visualization": len([t for t in tools if t["category"] == "data_visualization"]),
+                "file_operations": len([t for t in tools if t["category"] == "file_operations"])
+            },
+            "mcp_integration": "active"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo herramientas reales: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ===============================
-# NUEVOS ENDPOINTS MEMORIA VECTORIAL - AVANCE 2.5
+# EVENTOS DE INICIALIZACIÓN
 # ===============================
 
-class SemanticSearchRequest(BaseModel):
-    agent_id: str
-    query: str
-    limit: int = 10
-    memory_type: str = None
-    min_score: float = 0.3
-
-@app.post("/api/v1/memory/semantic-search")
-async def semantic_search_endpoint(request: SemanticSearchRequest):
-    """Búsqueda semántica usando embeddings vectoriales"""
+@app.on_event("startup")
+async def startup_event():
+    """Evento de inicio de la aplicación"""
+    logger.info("🚀 AgentOS iniciando...")
+    
+    # Inicializar componentes
     try:
-        results = vector_memory.semantic_search(
-            agent_id=request.agent_id,
-            query=request.query,
-            limit=request.limit,
-            memory_type=request.memory_type,
-            min_score=request.min_score
-        )
+        # Verificar que el cognitive_coordinator esté operativo
+        cognitive_status = cognitive_coordinator.get_cognitive_agents_status()
+        logger.info(f"✅ Cognitive Coordinator: {len(cognitive_status['cognitive_agents'])} agentes activos")
         
-        return {
-            "success": True,
-            "query": request.query,
-            "agent_id": request.agent_id,
-            "results": results,
-            "count": len(results),
-            "search_type": "semantic",
-            "embedding_model": vector_memory.model_name,
-            "timestamp": "2025-01-22"
-        }
+        # Verificar herramientas MCP
+        mcp_tools = await mcp_real_tools_bridge.get_available_real_tools()
+        logger.info(f"✅ MCP Real Tools Bridge: {len(mcp_tools)} herramientas registradas")
+        
+        logger.info("🎉 AgentOS iniciado exitosamente")
         
     except Exception as e:
-        logger.error(f"❌ Error en búsqueda semántica: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        logger.error(f"❌ Error en inicialización: {e}")
+        raise
 
-@app.post("/api/v1/memory/hybrid-search")
-async def hybrid_search_endpoint(request: SemanticSearchRequest):
-    """Búsqueda híbrida: semántica + tradicional (implementando G-Memory approach)"""
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Evento de cierre de la aplicación"""
+    logger.info("🛑 AgentOS cerrando...")
+    
+    # Limpiar recursos
     try:
-        results = vector_memory.hybrid_search(
-            agent_id=request.agent_id,
-            query=request.query,
-            limit=request.limit,
-            memory_type=request.memory_type
-        )
-        
-        # Separar estadísticas por tipo de búsqueda
-        semantic_count = len([r for r in results if r.get('search_type') == 'semantic'])
-        traditional_count = len([r for r in results if r.get('search_type') == 'traditional'])
-        
-        return {
-            "success": True,
-            "query": request.query,
-            "agent_id": request.agent_id,
-            "results": results,
-            "count": len(results),
-            "search_type": "hybrid",
-            "breakdown": {
-                "semantic_results": semantic_count,
-                "traditional_results": traditional_count
-            },
-            "embedding_model": vector_memory.model_name,
-            "timestamp": "2025-01-22"
-        }
+        # Cerrar conexiones y limpiar memoria
+        logger.info("🧹 Limpiando recursos...")
         
     except Exception as e:
-        logger.error(f"❌ Error en búsqueda híbrida: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        logger.error(f"Error en cierre: {e}")
 
-@app.post("/api/v1/memory/migrate-to-vectors/{agent_id}")
-async def migrate_memories_to_vectors(agent_id: str):
-    """Migra memorias existentes al sistema vectorial (SciBORG RAG indexing)"""
-    try:
-        migrated_count = vector_memory.migrate_existing_memories(agent_id)
-        
-        if migrated_count > 0:
-            return {
-                "success": True,
-                "agent_id": agent_id,
-                "migrated_memories": migrated_count,
-                "message": f"✅ {migrated_count} memorias migradas a sistema vectorial",
-                "embedding_model": vector_memory.model_name,
-                "timestamp": "2025-01-22"
-            }
-        else:
-            return {
-                "success": False,
-                "agent_id": agent_id,
-                "migrated_memories": 0,
-                "message": "No se encontraron memorias para migrar o error en migración",
-                "timestamp": "2025-01-22"
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error migrando memorias a vectores: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+# ===============================
+# MANEJO DE ERRORES
+# ===============================
 
-@app.get("/api/v1/memory/vector-stats/{agent_id}")
-async def get_vector_memory_stats(agent_id: str):
-    """Estadísticas del sistema de memoria vectorial"""
-    try:
-        vector_stats = vector_memory.get_vector_stats(agent_id)
-        traditional_stats = db_manager.get_memory_stats(agent_id)
-        
-        return {
-            "agent_id": agent_id,
-            "vector_memory": vector_stats,
-            "traditional_memory": traditional_stats,
-            "comparison": {
-                "vectors_indexed": vector_stats.get('total_vectors', 0),
-                "traditional_memories": traditional_stats.get('total_memories', 0),
-                "embedding_coverage": f"{(vector_stats.get('total_vectors', 0) / max(traditional_stats.get('total_memories', 1), 1) * 100):.1f}%"
-            },
-            "timestamp": "2025-01-22"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error obteniendo stats vectoriales: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# Modificar endpoint de store para auto-indexar en vectores
-@app.post("/api/v1/memory/store-enhanced")
-async def store_agent_memory_enhanced(request: MemoryStoreRequest):
-    """Almacena memoria con auto-indexación vectorial"""
-    try:
-        # Almacenar en BD tradicional
-        memory_id = db_manager.store_memory(
-            agent_id=request.agent_id,
-            memory_type=request.memory_type,
-            content=request.content,
-            context=request.context,
-            importance_score=request.importance_score,
-            tags=request.tags
-        )
-        
-        if memory_id > 0:
-            # Auto-indexar en sistema vectorial
-            vector_success = vector_memory.add_memory_to_vector_store(
-                agent_id=request.agent_id,
-                memory_id=memory_id,
-                content=request.content,
-                memory_type=request.memory_type,
-                importance_score=request.importance_score,
-                tags=request.tags
-            )
-            
-            return {
-                "success": True,
-                "memory_id": memory_id,
-                "message": f"Memoria almacenada para agente {request.agent_id}",
-                "vector_indexed": vector_success,
-                "enhanced_storage": True,
-                "timestamp": "2025-01-22"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Error almacenando memoria")
-            
-    except Exception as e:
-        logger.error(f"❌ Error en store enhanced: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-# Test endpoint para comparar tipos de búsqueda
-@app.post("/api/v1/memory/search-comparison")
-async def compare_search_methods(request: SemanticSearchRequest):
-    """Compara diferentes métodos de búsqueda (traditional vs semantic vs hybrid)"""
-    try:
-        # Búsqueda tradicional
-        traditional_results = db_manager.recall_memory(
-            agent_id=request.agent_id,
-            memory_type=request.memory_type,
-            search_term=request.query,
-            limit=request.limit
-        )
-        
-        # Búsqueda semántica
-        semantic_results = vector_memory.semantic_search(
-            agent_id=request.agent_id,
-            query=request.query,
-            limit=request.limit,
-            memory_type=request.memory_type,
-            min_score=request.min_score
-        )
-        
-        # Búsqueda híbrida
-        hybrid_results = vector_memory.hybrid_search(
-            agent_id=request.agent_id,
-            query=request.query,
-            limit=request.limit,
-            memory_type=request.memory_type
-        )
-        
-        return {
-            "query": request.query,
-            "agent_id": request.agent_id,
-            "comparison": {
-                "traditional": {
-                    "count": len(traditional_results),
-                    "results": traditional_results,
-                    "method": "SQL ILIKE"
-                },
-                "semantic": {
-                    "count": len(semantic_results),
-                    "results": semantic_results,
-                    "method": f"FAISS + {vector_memory.model_name}"
-                },
-                "hybrid": {
-                    "count": len(hybrid_results),
-                    "results": hybrid_results,
-                    "method": "Combined SQL + Vector"
-                }
-            },
-            "recommendation": "hybrid" if len(hybrid_results) >= len(semantic_results) else "semantic",
-            "timestamp": "2025-01-22"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error comparando métodos de búsqueda: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Manejador global de excepciones"""
+    logger.error(f"Error no manejado: {exc}")
+    return {
+        "error": "Error interno del servidor",
+        "detail": str(exc),
+        "status_code": 500
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

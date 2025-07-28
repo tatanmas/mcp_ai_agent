@@ -1,0 +1,59 @@
+sequenceDiagram
+    participant U as Usuario
+    participant MAC as MultiAgentCoordinator
+    participant CC as CognitiveCoordinator
+    participant RA as ResearcherAgent
+    participant CA as CoderAgent
+    participant DA as DefaultAgent
+    participant SM as Shared Memory
+    
+    U->>MAC: Tarea Compleja
+    
+    Note over MAC: FASE 1: ANÁLISIS
+    MAC->>MAC: Análisis Complejidad (G-Memory)
+    MAC->>MAC: Descomposición (MARCO Pattern)
+    MAC->>MAC: Asignación Agentes (AaaS-AN)
+    
+    Note over MAC,DA: FASE 2: COORDINACIÓN COGNITIVA
+    MAC->>CC: Coordinar Agentes Especializados
+    
+    CC->>RA: SubTask: Research & Analysis
+    Note over RA: Razonamiento Especializado<br/>+ Memoria Procedimental
+    RA->>SM: Store Research Results
+    RA->>CC: Research Completed
+    
+    CC->>CA: SubTask: Implementation
+    Note over CA: Razonamiento Técnico<br/>+ Procedimientos Código
+    CA->>SM: Store Code Results
+    CA->>CC: Implementation Completed
+    
+    Note over MAC,DA: FASE 3: EJECUCIÓN PARALELA
+    par Ejecución Paralela (AutoGen Pattern)
+        MAC->>RA: Execute Specialized Task
+        RA->>RA: Apply Research Procedures
+        RA-->>MAC: Research Result
+    and
+        MAC->>CA: Execute Specialized Task 
+        CA->>CA: Apply Code Procedures
+        CA-->>MAC: Code Result
+    end
+    
+    Note over MAC,SM: FASE 4: SÍNTESIS
+    MAC->>DA: Synthesize All Results
+    DA->>SM: Retrieve All Agent Results
+    SM-->>DA: Combined Results
+    DA->>DA: Apply Coordination Logic
+    DA->>SM: Store Final Synthesis
+    
+    Note over CC,SM: FASE 5: APRENDIZAJE COLECTIVO
+    CC->>SM: Update Collective Memory (MIRIX)
+    CC->>RA: Test-Time Learning Update
+    CC->>CA: Test-Time Learning Update
+    CC->>DA: Test-Time Learning Update
+    
+    MAC->>U: Resultado Final Coordinado
+    
+    Note over U,SM: MEMORIA PERSISTENTE
+    SM->>SM: Vector Embeddings (SciBORG)
+    SM->>SM: Hierarchical Storage (G-Memory)
+    SM->>SM: Cross-Agent Learning (MIRIX)

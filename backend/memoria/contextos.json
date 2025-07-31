@@ -1,0 +1,22 @@
+[
+  {
+    "nombre": "fondos_basales",
+    "descripcion_corta": "Contiene las bases legales, requisitos y criterios de evaluación de los fondos basales 2024. Usar cuando la pregunta es sobre cómo postular o entender las reglas de este fondo."
+  },
+  {
+    "nombre": "formulario_general",
+    "descripcion_corta": "Contiene ejemplos, tips y estructura del formulario general de postulación. Usar cuando la pregunta es sobre cómo llenar, entender o estructurar respuestas del formulario."
+  },
+  {
+    "nombre": "kodea_organizacion",
+    "descripcion_corta": "Contiene información sobre la Fundación Kodea, su historia, misión, valores, iniciativas y logros. Usar cuando se necesite información específica de la organización."
+  },
+  {
+    "nombre": "postulaciones_pasadas",
+    "descripcion_corta": "Contiene ejemplos de postulaciones exitosas y fallidas del pasado, con preguntas y respuestas. Usar para buscar patrones y mejores prácticas."
+  },
+  {
+    "nombre": "educacion_tecnologica",
+    "descripcion_corta": "Contiene información sobre programas de educación tecnológica, metodologías y mejores prácticas. Usar cuando se trate de iniciativas educativas."
+  }
+] 
